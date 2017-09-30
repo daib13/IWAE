@@ -15,4 +15,8 @@ GPU_ID: The gpu you want to use.
 
 It trains a IWAE on a synthesized dataset. The dataset is generated using a 2-layer neural network with fixed random weights. Thus it lies on a two dimensional manifold. The manifold dimension is set to be 20. A IWAE is trained on the synthesized dataset with the latent dimension to be 30, which is larger than the groundtruth value. We check the active dimension that IWAE learned. If the regularization effect of IWAE works well, the active dimension should be 20.
 
-[1]Burda, Yuri, Roger Grosse, and Ruslan Salakhutdinov. "Importance weighted autoencoders." arXiv preprint arXiv:1509.00519 (2015).
+# References
+
+[1] Burda, Yuri, Roger Grosse, and Ruslan Salakhutdinov. "Importance weighted autoencoders." arXiv preprint arXiv:1509.00519 (2015).
+
+[2] MNIST data in folder (data/MNIST) download from: http://yann.lecun.com/exdb/mnist/
