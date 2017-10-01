@@ -5,8 +5,8 @@ import numpy as np
 from mnist import MNIST
 
 
-class IWAE:
-    def __init__(self, batch_size, input_dim, hidden_dim, num_hidden, latent_dim, learning_rate, k, alpha):
+class IWAE_MNIST:
+    def __init__(self, batch_size, input_dim, hidden_dim, num_hidden, latent_dim, output_dim, learning_rate, k):
         self.batch_size = batch_size
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -15,7 +15,8 @@ class IWAE:
         self.learning_rate = learning_rate
         self.global_step = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
         self.k = k
-        self.alpha = alpha
+        self.output_dim = output_dim
+        self.protector = 1e-12
 
     def __create__placeholder(self):
         with tf.name_scope("data"):
@@ -36,7 +37,7 @@ class IWAE:
                     tf.contrib.layers.xavier_initializer(), trainable=True))
                 self.encoder_b.append(tf.Variable(tf.zeros([self.hidden_dim]), trainable=True, name=b_name))
                 self.encoder.append(tf.matmul(self.previous_tensor, self.encoder_w[i_hidden]) + self.encoder_b[i_hidden])
-                self.encoder_activate.append(tf.nn.relu(self.encoder[i_hidden]))
+                self.encoder_activate.append(tf.nn.tanh(self.encoder[i_hidden]))
                 self.previous_tensor = self.encoder_activate[i_hidden]
                 self.previous_dim = self.hidden_dim
             self.mu_z_w = tf.get_variable('mu_z_w', [self.previous_dim, self.latent_dim], tf.float32,
@@ -70,35 +71,51 @@ class IWAE:
                     tf.contrib.layers.xavier_initializer(), trainable=True))
                 self.decoder_b.append(tf.Variable(tf.zeros([self.hidden_dim]), trainable=True, name=b_name))
                 self.decoder.append(tf.matmul(self.previous_tensor, self.decoder_w[i_hidden]) + self.decoder_b[i_hidden])
-                self.decoder_activate.append(tf.nn.relu(self.decoder[i_hidden]))
+                self.decoder_activate.append(tf.nn.tanh(self.decoder[i_hidden]))
                 self.previous_tensor = self.decoder_activate[i_hidden]
                 self.previous_dim = self.hidden_dim
             self.x_hat_w = tf.get_variable('x_hat_w', [self.previous_dim, self.input_dim], tf.float32,
                 tf.contrib.layers.xavier_initializer(), trainable=True)
             self.x_hat_b = tf.Variable(tf.zeros([self.input_dim]), trainable=True, name='x_hat_b')
-            self.x_hat = tf.matmul(self.previous_tensor, self.x_hat_w) + self.x_hat_b
+            self.x_hat = tf.nn.sigmoid(tf.matmul(self.previous_tensor, self.x_hat_w) + self.x_hat_b)
             self.x_hat_reshape = tf.reshape(self.x_hat, [self.batch_size, self.k, self.input_dim])
 
     def __create_loss(self):
         with tf.name_scope("loss"):
-            self.logit_z = tf.log(self.sd_z_tile + 1e-12) + tf.square(self.noise) / 2 - tf.square(self.z) / 2
+            self.logit_z = tf.log(self.sd_z_tile + self.protector) + tf.square(self.noise) / 2 - tf.square(self.z) / 2
             self.x_tile = tf.tile(tf.reshape(self.x, [self.batch_size, 1, self.input_dim]), [1, self.k, 1])
-#            self.logit_x = - tf.square(self.x_hat_reshape - self.x_tile) / 2 / self.alpha
-#            self.logit_x = - tf.log(tf.square(self.x_hat_reshape - self.x_tile) + self.alpha)
-            self.logit_x = - tf.multiply(self.x_hat_reshape, tf.log(self.x_tile + 1e-6)) - tf.multiply(1 - self.x_hat_reshape, tf.log(1 - self.x_tile + 1e-6))
+            self.logit_x = tf.multiply(self.x_hat_reshape, tf.log(self.x_tile + self.protector)) + tf.multiply(1 - self.x_hat_reshape, tf.log(1 - self.x_tile + self.protector))
             self.logit = tf.reduce_sum(self.logit_z, 2) + tf.reduce_sum(self.logit_x, 2)
             self.logit_max = tf.reduce_max(self.logit, 1)
             self.logit_max_tile = tf.tile(tf.reshape(self.logit_max, [self.batch_size, 1]), [1, self.k])
             self.res = tf.reduce_sum(tf.exp(self.logit - self.logit_max_tile), 1)
-            self.loss = - tf.reduce_sum(self.logit_max + tf.log(self.res)) / self.batch_size
+            self.loss = -tf.reduce_sum(self.logit_max + tf.log(self.res)) / self.batch_size
 
     def __create_optimizer(self):
         with tf.name_scope("optimizer"):
             self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss)
 
+    def __create_classification(self):
+        with tf.name_scope("classifier"):
+            self.y = tf.placeholder(tf.float32, shape=[self.batch_size, self.output_dim], name='y_gt')
+            self.feature = tf.stop_gradient(self.mu_z, name='feature')
+            self.classifier_w = tf.get_variable('classifier_w', [self.latent_dim, self.output_dim], tf.float32,
+                tf.contrib.layers.xavier_initializer(), trainable=True)
+            self.classifier_b = tf.Variable(tf.zeros([self.output_dim]), trainable=True, name='classifier_b')
+            self.output_logit = tf.matmul(self.feature, self.classifier_w) + self.classifier_b
+            self.classifier_loss = tf.nn.softmax_cross_entropy_with_logits(logits=self.output_logit, labels=self.y, name='classifier_loss')
+        with tf.name_scope("evaluate"):
+            self.label_gt = tf.argmax(self.y, name='label_gt')
+            self.label = tf.argmax(self.output_logit, name='label')
+            self.correct_prediction = tf.equal(self.label_gt, self.label, name='correct_prediction')
+            self.accuracy = tf.reduce_mean(tf.cast(self.correct_prediction, tf.float32), name='accuracy')
+        with tf.name_scope("classifier_optimizer"):
+            self.classifier_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.classifier_loss)
+
     def __create_summary(self):
         with tf.name_scope("summary"):
-            self.summary = tf.summary.scalar('loss', self.loss)
+            self.summary_iwae = tf.summary.scalar('loss', self.loss)
+            self.summary_classifier = tf.summary.scalar('classifier_loss', self.classifier_loss)
 
     def build_graph(self):
         self.__create__placeholder()
@@ -106,6 +123,7 @@ class IWAE:
         self.__create_decoder()
         self.__create_loss()
         self.__create_optimizer()
+        self.__create_classification()
         self.__create_summary()
 
 
@@ -119,38 +137,71 @@ def load_mnist_data(flag='training'):
             images, labels = mndata.load_testing()
             return images, labels
         else:
-            raise Exception('Flag should be either trainint or testing.')
+            raise Exception('Flag should be either training or testing.')
     except Exception:
         print("Flag error")
         raise
 
 
 
-def train_model(model):
+def train_model(model, x, y, num_epoch):
     saver = tf.train.Saver()
     if not os.path.exists('./model'):
         os.mkdir('./model')
 
     with tf.Session() as sess:
+        # initialize
         sess.run(tf.global_variables_initializer())
         ckpt = tf.train.get_checkpoint_state(os.path.dirname('model/checkpoint'))
         if ckpt and ckpt.model_checkpoint_path:
             saver.restore(sess, ckpt.model_checkpoint_path)
 
+        # train autoencoder
         total_loss = 0
         writer = tf.summary.FileWriter('graph', sess.graph)
         initial_step = model.global_step.eval()
-        finish_step = 200000
+        iteration_per_epoch = x.shape[0] / model.batch_size
+        finish_step = num_epoch * iteration_per_epoch
+        start_idx = 0
+        end_idx = start_idx + model.batch_size
         for index in range(initial_step, int(finish_step)):
-            batch_loss, _, summary = sess.run([model.loss, model.optimizer, model.summary])
+            feed_dict = {model.x: x[start_idx:end_idx, :], model.y: y[start_idx:end_idx, :]}
+            start_idx += model.batch_size
+            end_idx += model.batch_size
+            if end_idx >= x.shape[0]:
+                start_idx = 0
+                end_idx = start_idx + model.batch_size
+            batch_loss, _, summary = sess.run([model.loss, model.optimizer, model.summary_iwae], feed_dict=feed_dict)
             total_loss += batch_loss
             writer.add_summary(summary, index)
 
-            if (index+1) % 200 == 0:
-                print('Iter = {0}, loss = {1}.'.format(index, total_loss / 200))
+            if (index+1) % iteration_per_epoch == 0:
+                print('Iter = {0}, loss = {1}.'.format(index, total_loss / iteration_per_epoch))
                 total_loss = 0
 
-            if (index+1) % 50000 == 0:
+            if (index+1) % iteration_per_epoch == 0:
+                saver.save(sess, 'model/VAE' + str(index))
+
+        # train classifier
+        total_loss = 0
+        finish_step2 = 2 * finish_step
+        for index in range(int(finish_step), int(finish_step2)):
+            feed_dict = {model.x: x[start_idx:end_idx, :], model.y: y[start_idx:end_idx, :]}
+            start_idx += model.batch_size
+            end_idx += model.batch_size
+            if end_idx >= x.shape[0]:
+                start_idx = 0
+                end_idx = start_idx + model.batch_size
+
+            batch_loss, _, summary = sess.run([model.classifier_loss, model.classifier_optimizer, model.summary_classifier], feed_dict=feed_dict)
+            total_loss += batch_loss
+            writer.add_summary(summary, index - finish_step)
+
+            if (index+1) % iteration_per_epoch == 0:
+                print('Iter = {0}, loss = {1}.'.format(index, total_loss / iteration_per_epoch))
+                total_loss = 0
+
+            if (index+1) % iteration_per_epoch == 0:
                 saver.save(sess, 'model/VAE' + str(index))
 
 
@@ -167,16 +218,22 @@ def evaluate_wo(model):
         return np.sum(w_norm > 0.01 * w_norm_max)
 
 
-def main(k, alpha):
-    images, labels = load_mnist_data('trainding')
-#    model = IWAE(100, 400, 200, 2, 30, 0.0003, k, alpha)
-#    model.build_graph()
+def main(k):
+    NUM_EPOCH = 10
+    images_list, labels_list = load_mnist_data('training')
+    images = np.array(images_list) / 255
+    labels = np.array(labels_list)
+    one_hot_labels = np.zeros((labels.size, labels.max() + 1))
+    one_hot_labels[np.arange(labels.size), labels] = 1
+
+    model = IWAE_MNIST(100, 784, 200, 2, 50, 10, 0.0003, k)
+    model.build_graph()
 
 #    orig_stdout = sys.stdout
 #    f = open('log.txt', 'w')
 #    sys.stdout = f
 
-#    train_model(model)
+    train_model(model, images, one_hot_labels, NUM_EPOCH)
 #    num_active = evaluate_wo(model)
 #    print('num active = {0}.'.format(num_active))
 
@@ -189,4 +246,4 @@ if __name__ == '__main__':
 #    alpha = float(sys.argv[2])
 #    os.environ['CUDA_VISIBLE_DEVICES'] = sys.argv[3]
 #    main(k, alpha)
-    main(1, 1)
+    main(1)
