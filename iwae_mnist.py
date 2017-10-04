@@ -84,7 +84,7 @@ class IWAE_MNIST:
         with tf.name_scope("loss"):
             self.logit_z = tf.log(self.sd_z_tile + self.protector) + tf.square(self.noise) / 2 - tf.square(self.z) / 2
             self.x_tile = tf.tile(tf.reshape(self.x, [self.batch_size, 1, self.input_dim]), [1, self.k, 1])
-            self.logit_x = tf.multiply(self.x_hat_reshape, tf.log(self.x_tile + self.protector)) + tf.multiply(1 - self.x_hat_reshape, tf.log(1 - self.x_tile + self.protector))
+            self.logit_x = tf.multiply(self.x_tile, tf.log(self.x_hat_reshape + self.protector)) + tf.multiply(1 - self.x_tile, tf.log(1 - self.x_hat_reshape + self.protector))
             self.logit = tf.reduce_sum(self.logit_z, 2) + tf.reduce_sum(self.logit_x, 2)
             self.logit_max = tf.reduce_max(self.logit, 1)
             self.logit_max_tile = tf.tile(tf.reshape(self.logit_max, [self.batch_size, 1]), [1, self.k])
@@ -103,10 +103,12 @@ class IWAE_MNIST:
                 tf.contrib.layers.xavier_initializer(), trainable=True)
             self.classifier_b = tf.Variable(tf.zeros([self.output_dim]), trainable=True, name='classifier_b')
             self.output_logit = tf.matmul(self.feature, self.classifier_w) + self.classifier_b
-            self.classifier_loss = tf.nn.softmax_cross_entropy_with_logits(logits=self.output_logit, labels=self.y, name='classifier_loss')
+            self.classifier_loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(logits=self.output_logit,
+                                                                                         labels=self.y),
+                                                 name='classifier_loss') / self.batch_size
         with tf.name_scope("evaluate"):
-            self.label_gt = tf.argmax(self.y, name='label_gt')
-            self.label = tf.argmax(self.output_logit, name='label')
+            self.label_gt = tf.argmax(self.y, axis=1, name='label_gt')
+            self.label = tf.argmax(self.output_logit, axis=1, name='label')
             self.correct_prediction = tf.equal(self.label_gt, self.label, name='correct_prediction')
             self.accuracy = tf.reduce_mean(tf.cast(self.correct_prediction, tf.float32), name='accuracy')
         with tf.name_scope("classifier_optimizer"):
@@ -132,16 +134,18 @@ def load_mnist_data(flag='training'):
     try:
         if flag == 'training':
             images, labels = mndata.load_training()
-            return images, labels
         elif flag == 'testing':
             images, labels = mndata.load_testing()
-            return images, labels
         else:
             raise Exception('Flag should be either training or testing.')
     except Exception:
         print("Flag error")
         raise
-
+    images_array = np.array(images) / 255
+    labels_array = np.array(labels)
+    one_hot_labels = np.zeros((labels_array.size, labels_array.max() + 1))
+    one_hot_labels[np.arange(labels_array.size), labels_array] = 1
+    return images_array, one_hot_labels
 
 
 def train_model(model, x, y, num_epoch):
@@ -205,45 +209,56 @@ def train_model(model, x, y, num_epoch):
                 saver.save(sess, 'model/VAE' + str(index))
 
 
-def evaluate_wo(model):
+def test_model(model, x, y):
     saver = tf.train.Saver()
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         ckpt = tf.train.get_checkpoint_state(os.path.dirname('model/checkpoint'))
         if ckpt and ckpt.model_checkpoint_path:
             saver.restore(sess, ckpt.model_checkpoint_path)
-        w = model.decoder_w[0].eval(session=sess)
-        w_norm = np.sum(np.square(w), 1)
-        w_norm_max = np.max(w_norm)
-        return np.sum(w_norm > 0.01 * w_norm_max)
+        total_accuracy = 0
+        iteration_per_epoch = int(x.shape[0] / model.batch_size)
+        start_idx = 0
+        end_idx = start_idx + model.batch_size
+        for index in range(iteration_per_epoch):
+            feed_dict = {model.x: x[start_idx:end_idx, :], model.y: y[start_idx:end_idx, :]}
+            start_idx += model.batch_size
+            end_idx = start_idx + model.batch_size
+            batch_accuracy = sess.run(model.accuracy, feed_dict=feed_dict)
+            total_accuracy += batch_accuracy
+        total_accuracy /= iteration_per_epoch
+        return total_accuracy
 
 
 def main(k):
-    NUM_EPOCH = 10
-    images_list, labels_list = load_mnist_data('training')
-    images = np.array(images_list) / 255
-    labels = np.array(labels_list)
-    one_hot_labels = np.zeros((labels.size, labels.max() + 1))
-    one_hot_labels[np.arange(labels.size), labels] = 1
+    NUM_EPOCH = 500
+
+    images_train, labels_train = load_mnist_data('training')
+    images_test, labels_test = load_mnist_data('testing')
 
     model = IWAE_MNIST(100, 784, 200, 2, 50, 10, 0.0003, k)
     model.build_graph()
 
-#    orig_stdout = sys.stdout
-#    f = open('log.txt', 'w')
-#    sys.stdout = f
+    orig_stdout = sys.stdout
+    f = open('log.txt', 'w')
+    sys.stdout = f
 
-    train_model(model, images, one_hot_labels, NUM_EPOCH)
+    train_model(model, images_train, labels_train, NUM_EPOCH)
+    accuracy = test_model(model, images_train, labels_train)
+    print('Train accuracy = {0}.'.format(accuracy))
+    accuracy = test_model(model, images_test, labels_test)
+    print('Test accuracy = {0}.'.format(accuracy))
 #    num_active = evaluate_wo(model)
 #    print('num active = {0}.'.format(num_active))
 
-#    sys.stdout = orig_stdout
-#    f.close()
+    sys.stdout = orig_stdout
+    f.close()
 
 
 if __name__ == '__main__':
-#    k = int(sys.argv[1])
+#    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+    k = int(sys.argv[1])
 #    alpha = float(sys.argv[2])
-#    os.environ['CUDA_VISIBLE_DEVICES'] = sys.argv[3]
+    os.environ['CUDA_VISIBLE_DEVICES'] = sys.argv[2]
 #    main(k, alpha)
     main(1)
