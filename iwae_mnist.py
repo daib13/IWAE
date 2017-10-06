@@ -261,4 +261,4 @@ if __name__ == '__main__':
 #    alpha = float(sys.argv[2])
     os.environ['CUDA_VISIBLE_DEVICES'] = sys.argv[2]
 #    main(k, alpha)
-    main(1)
+    main(k)
